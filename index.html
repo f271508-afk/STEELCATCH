@@ -1,0 +1,769 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+    <title>鋼構數量計算系統 | 防火被覆統計 (梁公式更新版) - 一鍵刪除所有構件</title>
+    <!-- Tailwind CSS v3 + Font Awesome 6 -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <!-- React & ReactDOM & Babel -->
+    <script src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.development.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.development.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@babel/standalone/babel.min.js"></script>
+    <style>
+        .no-spinner::-webkit-outer-spin-button,
+        .no-spinner::-webkit-inner-spin-button {
+            -webkit-appearance: none;
+            margin: 0;
+        }
+        .no-spinner {
+            -moz-appearance: textfield;
+            appearance: textfield;
+        }
+        .custom-scrollbar::-webkit-scrollbar {
+            width: 6px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-track {
+            background: #f1f1f1;
+            border-radius: 10px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+            background: #cbd5e1;
+            border-radius: 10px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+            background: #94a3b8;
+        }
+        .animate-in {
+            animation: fadeIn 0.2s ease-in-out;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(-4px);}
+            to { opacity: 1; transform: translateY(0);}
+        }
+        body {
+            font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, sans-serif;
+        }
+
+        @media print {
+            body { background-color: white; padding: 0; margin: 0; }
+            .no-print, .print-hide, button:not(.keep-in-print), .sticky, .delete-item-btn, .toggle-expand-icon, .add-item-btn, .export-pdf-btn, .csv-btn, .clear-all-btn { display: none !important; }
+            .print-show { display: block !important; }
+            .bg-green-50 { background-color: white !important; }
+            .shadow-md, .shadow-xl, .shadow { box-shadow: none !important; }
+            .border { border: 1px solid #ddd !important; }
+            .rounded-2xl, .rounded-3xl, .rounded-xl { border-radius: 0.5rem !important; }
+            .p-8, .p-6, .p-5 { padding: 1rem !important; }
+            .grid { display: block !important; }
+            .lg\:col-span-8, .lg\:col-span-4 { width: 100% !important; max-width: 100% !important; }
+            table { width: 100% !important; border-collapse: collapse !important; page-break-inside: avoid; }
+            th, td { border: 1px solid #ccc !important; padding: 6px !important; }
+            .break-inside-avoid { break-inside: avoid; page-break-inside: avoid; }
+            header { border-bottom: 2px solid #333; margin-bottom: 1rem; }
+            .total-weight-card { background: #f3f4f6; border: 1px solid #aaa; }
+        }
+    </style>
+</head>
+<body class="antialiased">
+
+<div id="root"></div>
+
+<script type="text/babel">
+    const STEEL_DENSITY = 7.85;
+
+    // ======================= 防火被覆面積計算 (核心更新: 梁採用新公式) =======================
+    // category: '柱' 或 '梁'
+    // h_mm, b_mm: 高度/寬度 (mm)
+    // length_mm: 長度 (mm)
+    // t1_mm: 腹板厚度 (僅梁公式需要，柱可傳0)
+    const calculateSingleFireArea = (category, h_mm, b_mm, length_mm, t1_mm = 0) => {
+        if (category === '柱') {
+            // 柱: 四面被覆 (2*(H+B)*L)
+            return (2 * (h_mm + b_mm) * length_mm) / 1_000_000;
+        } else {
+            // 梁: 新公式 (H*2 + W*3 - T1*2) * L  / 1e6
+            // 註: 根據用戶指定公式，減去2倍腹板厚度
+            const numerator = (h_mm * 2 + b_mm * 3 - t1_mm * 2) * length_mm;
+            return numerator / 1_000_000;
+        }
+    };
+
+    // 重量計算核心 (回傳：主重、加勁板+連接板重、緊固件重、單根總重(不含緊固件)、總重乘數量(不含緊固件))
+    const calculateWeightDetails = (data, type) => {
+        let mainWeight = 0;
+        const L_m = (data.length || 0) / 1000;
+        const H_m = (data.h || 0) / 1000;
+        const B_m = (data.w || 0) / 1000;   // 內部變數仍為w，對應寬度B
+        const T1_m = (data.t1 || 0) / 1000;
+        const T2_m = (data.t2 || 0) / 1000;
+        let formulaMain = "";
+
+        if (type === 'RH' && data.rhUnitWeight > 0) {
+            mainWeight = (data.rhUnitWeight * L_m) / 1000;
+            formulaMain = `[RH] ${data.rhUnitWeight} kg/m × ${L_m.toFixed(3)} m / 1000 = ${mainWeight.toFixed(3)} t`;
+        } else if (type === 'BOX') {
+            // BOX柱：單一板厚 T (t1 = t2 = T)
+            const T = T1_m;
+            const area = (B_m * T * 2) + ((H_m - 2 * T) * T * 2);
+            mainWeight = area * L_m * STEEL_DENSITY;
+            formulaMain = `[BOX] (${B_m.toFixed(3)}×${T.toFixed(3)}×2 + (${H_m.toFixed(3)}-2×${T.toFixed(3)})×${T.toFixed(3)}×2) × ${L_m.toFixed(3)}m × ${STEEL_DENSITY} = ${mainWeight.toFixed(3)} t`;
+        } else {
+            // BH梁
+            const area = (B_m * T1_m * 2) + ((H_m - 2 * T1_m) * T2_m);
+            mainWeight = area * L_m * STEEL_DENSITY;
+            formulaMain = `[BH] (${B_m.toFixed(3)}×${T1_m.toFixed(3)}×2 + (${H_m.toFixed(3)}-2×${T1_m.toFixed(3)})×${T2_m.toFixed(3)}) × ${L_m.toFixed(3)}m × ${STEEL_DENSITY} = ${mainWeight.toFixed(3)} t`;
+        }
+
+        // 加勁板重量
+        const stiffWeight = ((data.stiffenerCount || 0) * ((data.stiffenerW || 0) / 1000) * ((data.stiffenerH || 0) / 1000) * ((data.stiffenerT || 0) / 1000) * STEEL_DENSITY);
+        // 連接板重量
+        const connPlateTotalCount = (data.connectionPlateCountPerFace || 0) * (data.connectionPlateFaces || 0);
+        const connWeight = connPlateTotalCount * ((data.connectionPlateW || 0) / 1000) * ((data.connectionPlateH || 0) / 1000) * ((data.connectionPlateT || 0) / 1000) * STEEL_DENSITY;
+        
+        // 零件重量：僅加勁板+連接板
+        const partsStiffConnWeight = stiffWeight + connWeight;
+        
+        // 剪力釘 & 螺栓 (緊固件，獨立顯示，不納入合計總重)
+        const studWeight = ((data.studCount || 0) * 0.3) / 1000;
+        const boltWeightTotal = ((data.boltTotalCount || 0) * (data.boltWeight || 0)) / 1000;
+        const fastenersWeight = studWeight + boltWeightTotal;
+        
+        // 單根總重 (主體 + 零件(加勁+連接板)) 不含緊固件
+        const unitTotal = mainWeight + partsStiffConnWeight;
+        // 總重乘數量 (不含緊固件)
+        const totalWithoutFasteners = unitTotal * (data.count || 1);
+        
+        // 公式明細
+        const partsStiffConnFormulas = [];
+        if (data.stiffenerCount > 0) {
+            partsStiffConnFormulas.push(`加勁板: ${data.stiffenerCount}片 × (${data.stiffenerW}×${data.stiffenerH}×${data.stiffenerT}) = ${stiffWeight.toFixed(3)} t`);
+        }
+        if (connPlateTotalCount > 0) {
+            partsStiffConnFormulas.push(`連接板: ${connPlateTotalCount}片 (${data.connectionPlateCountPerFace}支/面 × ${data.connectionPlateFaces}面) × (${data.connectionPlateW}×${data.connectionPlateH}×${data.connectionPlateT}) = ${connWeight.toFixed(3)} t`);
+        }
+        
+        const fastenersFormulas = [];
+        if (data.studCount > 0) {
+            fastenersFormulas.push(`剪力釘: ${data.studCount}支 (間距${data.studSpacing} / 每面${data.studRowsPerFace}排 / 共${data.studFaces}面) × 0.3kg = ${studWeight.toFixed(3)} t`);
+        }
+        if (data.boltTotalCount > 0) {
+            fastenersFormulas.push(`高強螺栓: ${data.boltTotalCount}支 (單面${data.boltCountPerFace}支 / 共${data.boltFaces}面) × ${data.boltWeight}kg = ${boltWeightTotal.toFixed(3)} t`);
+        }
+        
+        return {
+            main: mainWeight,
+            partsStiffConn: partsStiffConnWeight,
+            fasteners: fastenersWeight,
+            unitTotal: unitTotal,
+            total: totalWithoutFasteners,
+            formulaMain,
+            partsStiffConnFormulas,
+            fastenersFormulas
+        };
+    };
+
+    // 根據原始輸入建立完整構件物件 (不再預存fireArea，改為動態計算)
+    const buildItemFromRaw = (raw, sectionType, itemId = null) => {
+        let studCount = 0;
+        if (raw.studSpacing > 0 && raw.studRowsPerFace > 0 && raw.studFaces > 0 && raw.length > 0) {
+            studCount = Math.ceil(raw.length / raw.studSpacing) * (raw.studRowsPerFace || 0) * (raw.studFaces || 0);
+        }
+        const boltTotalCount = (raw.boltCountPerFace || 0) * (raw.boltFaces || 0);
+        
+        const enrichedData = {
+            ...raw,
+            studCount: studCount,
+            boltTotalCount: boltTotalCount
+        };
+        
+        const category = sectionType === 'BOX' ? '柱' : '梁';
+        const weights = calculateWeightDetails(enrichedData, sectionType);
+        
+        return {
+            ...enrichedData,
+            id: itemId !== null ? itemId : Date.now(),
+            type: sectionType,
+            category: category,
+            weights: weights,
+            // 不再儲存 fireArea，統一由動態函數 getFireAreaByItem 計算 (確保公式即時更新)
+        };
+    };
+
+    const App = () => {
+        const [items, setItems] = React.useState([]);
+        const [activeTab, setActiveTab] = React.useState('BOX');
+        const [expandedItems, setExpandedItems] = React.useState({});
+        const fileInputRef = React.useRef(null);
+
+        // 表單狀態：BOX柱使用 t1 代表單一板厚，t2 與 t1 同步；BH/RH 分別使用 t1/t2
+        const [formData, setFormData] = React.useState({
+            name: '',
+            floor: '1F',
+            count: 1,
+            h: 500.000,
+            w: 500.000,      // 寬度 B
+            t1: 25.000,      // BOX時為板厚 T；BH/RH時為腹板厚
+            t2: 25.000,      // BOX時與t1相同；BH/RH時為翼板厚
+            length: 10000.000,
+            rhUnitWeight: 0,
+            stiffenerCount: 2,
+            stiffenerW: 450.000,
+            stiffenerH: 450.000,
+            stiffenerT: 25.000,
+            connectionPlateCountPerFace: 1,
+            connectionPlateFaces: 1,
+            connectionPlateW: 200.000,
+            connectionPlateH: 400.000,
+            connectionPlateT: 16.000,
+            studSpacing: 200,
+            studRowsPerFace: 2,
+            studFaces: 4,
+            studCount: 0,
+            boltCountPerFace: 8,
+            boltFaces: 0,
+            boltTotalCount: 0,
+            boltWeight: 0.500
+        });
+
+        // ================= 動態防火面積計算 (支援新梁公式) =================
+        const getFireAreaByItem = React.useCallback((item) => {
+            // 柱: 不需要t1; 梁: 使用腹板厚度 item.t1
+            const t1_mm = (item.category === '梁') ? (item.t1 || 0) : 0;
+            return calculateSingleFireArea(item.category, item.h, item.w, item.length, t1_mm);
+        }, []);
+
+        // 切換標籤時調整預設值
+        React.useEffect(() => {
+            if (activeTab === 'BOX') {
+                setFormData(prev => ({
+                    ...prev,
+                    studFaces: 4,
+                    connectionPlateFaces: 1,
+                    t2: prev.t1
+                }));
+            } else {
+                setFormData(prev => ({
+                    ...prev,
+                    studFaces: 1,
+                    connectionPlateFaces: 2,
+                    boltFaces: prev.boltFaces === undefined || (prev.boltFaces === 0 && activeTab !== 'BOX') ? 2 : prev.boltFaces
+                }));
+            }
+        }, [activeTab]);
+
+        // 當 BOX 模式下 t1 變更時，自動同步 t2
+        React.useEffect(() => {
+            if (activeTab === 'BOX') {
+                setFormData(prev => ({ ...prev, t2: prev.t1 }));
+            }
+        }, [formData.t1, activeTab]);
+
+        // 自動計算剪力釘數量
+        React.useEffect(() => {
+            if (formData.studSpacing > 0) {
+                const calculated = Math.ceil(formData.length / formData.studSpacing) * (formData.studRowsPerFace || 0) * (formData.studFaces || 0);
+                setFormData(prev => ({ ...prev, studCount: calculated }));
+            }
+        }, [formData.length, formData.studSpacing, formData.studRowsPerFace, formData.studFaces]);
+
+        // 自動計算螺栓總數量
+        React.useEffect(() => {
+            const total = (formData.boltCountPerFace || 0) * (formData.boltFaces || 0);
+            setFormData(prev => ({ ...prev, boltTotalCount: total }));
+        }, [formData.boltCountPerFace, formData.boltFaces]);
+
+        // 加勁板尺寸自動調整 (BOX柱內縮，BH/RH同外寬)
+        React.useEffect(() => {
+            if (activeTab === 'BOX') {
+                const innerB = Math.max(0, formData.w - (formData.t1 * 2));
+                const innerH = Math.max(0, formData.h - (formData.t1 * 2));
+                setFormData(prev => ({
+                    ...prev,
+                    stiffenerW: parseFloat(innerB.toFixed(3)),
+                    stiffenerH: parseFloat(innerH.toFixed(3))
+                }));
+            } else {
+                setFormData(prev => ({
+                    ...prev,
+                    stiffenerW: formData.w,
+                    stiffenerH: formData.h
+                }));
+            }
+        }, [formData.w, formData.h, formData.t1, activeTab]);
+
+        const handleInputChange = (e) => {
+            const { name, value } = e.target;
+            setFormData(prev => ({
+                ...prev,
+                [name]: (name === 'name' || name === 'floor') ? value : (value === '' ? '' : parseFloat(value))
+            }));
+        };
+
+        const addItem = () => {
+            if (!formData.name || formData.name.trim() === '') {
+                alert("請填寫構件編號 (例如 C1、G2)");
+                return;
+            }
+            if (activeTab === 'RH' && (formData.rhUnitWeight <= 0 || isNaN(formData.rhUnitWeight))) {
+                alert("RH 型鋼請務必填寫「單位重量 (kg/m)」，以利正確計算。");
+                return;
+            }
+            
+            const rawForBuild = { ...formData };
+            const newItem = buildItemFromRaw(rawForBuild, activeTab, Date.now());
+            setItems([...items, newItem]);
+            setFormData(prev => ({ ...prev, name: '' }));
+        };
+
+        const removeItem = (id) => {
+            setItems(items.filter(item => item.id !== id));
+        };
+
+        const toggleExpand = (id) => {
+            setExpandedItems(prev => ({ ...prev, [id]: !prev[id] }));
+        };
+
+        // 一鍵刪除所有構件
+        const handleClearAllItems = () => {
+            if (items.length === 0) {
+                alert("目前沒有構件資料可清空");
+                return;
+            }
+            if (window.confirm("⚠️ 確定要刪除「所有構件」嗎？此操作無法復原，所有已新增的鋼構件將被移除。")) {
+                setItems([]);
+                setExpandedItems({});
+            }
+        };
+
+        // 樓層統計 (總重僅含主體+加勁+連接板，不含緊固件；防火面積動態計算)
+        const floorStats = React.useMemo(() => {
+            const stats = {};
+            items.forEach(item => {
+                const floor = item.floor;
+                if (!stats[floor]) {
+                    stats[floor] = { 
+                        beam: 0, column: 0, total: 0, 
+                        studs: 0, bolts: 0,
+                        beamFire: 0, columnFire: 0, totalFire: 0
+                    };
+                }
+                const qty = item.count || 1;
+                const fireAreaSingle = getFireAreaByItem(item);
+                const totalFireForItem = fireAreaSingle * qty;
+                if (item.category === '梁') {
+                    stats[floor].beam += item.weights.total;
+                    stats[floor].beamFire += totalFireForItem;
+                } else {
+                    stats[floor].column += item.weights.total;
+                    stats[floor].columnFire += totalFireForItem;
+                }
+                stats[floor].total += item.weights.total;
+                stats[floor].totalFire += totalFireForItem;
+                stats[floor].studs += (item.studCount || 0) * qty;
+                stats[floor].bolts += (item.boltTotalCount || 0) * qty;
+            });
+            return Object.entries(stats).sort((a, b) => a[0].localeCompare(b[0]));
+        }, [items, getFireAreaByItem]);
+
+        const totalWeight = React.useMemo(() => items.reduce((sum, item) => sum + item.weights.total, 0), [items]);
+        const totalBeamWeight = React.useMemo(() => items.reduce((sum, item) => item.category === '梁' ? sum + item.weights.total : sum, 0), [items]);
+        const totalColumnWeight = React.useMemo(() => items.reduce((sum, item) => item.category === '柱' ? sum + item.weights.total : sum, 0), [items]);
+        const totalStudsAll = React.useMemo(() => items.reduce((sum, item) => sum + (item.studCount || 0) * (item.count || 1), 0), [items]);
+        const totalBoltsAll = React.useMemo(() => items.reduce((sum, item) => sum + (item.boltTotalCount || 0) * (item.count || 1), 0), [items]);
+        const totalFastenersWeight = React.useMemo(() => {
+            let total = 0;
+            for (const item of items) {
+                const qty = item.count || 1;
+                const studWeight = ((item.studCount || 0) * 0.3 * qty) / 1000;
+                const boltWeight = ((item.boltTotalCount || 0) * (item.boltWeight || 0) * qty) / 1000;
+                total += studWeight + boltWeight;
+            }
+            return total;
+        }, [items]);
+        
+        // 防火總面積動態計算 (新公式)
+        const totalBeamFire = React.useMemo(() => {
+            return items.reduce((sum, item) => {
+                if (item.category === '梁') return sum + (getFireAreaByItem(item) * (item.count || 1));
+                return sum;
+            }, 0);
+        }, [items, getFireAreaByItem]);
+        
+        const totalColumnFire = React.useMemo(() => {
+            return items.reduce((sum, item) => {
+                if (item.category === '柱') return sum + (getFireAreaByItem(item) * (item.count || 1));
+                return sum;
+            }, 0);
+        }, [items, getFireAreaByItem]);
+        
+        const totalFireArea = totalBeamFire + totalColumnFire;
+
+        const handleExportPDF = () => { window.print(); };
+
+        // CSV 匯出 (防火面積使用動態計算)
+        const exportToCSV = () => {
+            if (items.length === 0) {
+                alert("目前無任何構件，無法匯出CSV。");
+                return;
+            }
+            const headers = [
+                "構件編號", "樓層", "類型(柱/梁)", "截面型式(BOX/BH/RH)", 
+                "高h(mm)", "寬B(mm)", "板厚T/腹板厚t1(mm)", "翼板厚t2(mm)", "長度(mm)", 
+                "RH單位重量(kg/m)", "數量", 
+                "加勁板數量", "加勁板W(mm)", "加勁板H(mm)", "加勁板T(mm)",
+                "連接板每面片數", "連接板面數", "連接板W(mm)", "連接板H(mm)", "連接板T(mm)",
+                "剪力釘面數", "剪力釘每面排數", "剪力釘間距(mm)",
+                "螺栓面數", "螺栓單面支數", "螺栓單重(kg)",
+                "單根總重(t)參考(不含緊固件)", "單根防火面積(m²)參考"
+            ];
+            
+            const rows = items.map(item => {
+                const fireAreaSingle = getFireAreaByItem(item);
+                return [
+                    item.name, item.floor, item.category, item.type,
+                    item.h, item.w, item.t1, item.t2, item.length,
+                    item.rhUnitWeight || 0, item.count,
+                    item.stiffenerCount || 0, item.stiffenerW || 0, item.stiffenerH || 0, item.stiffenerT || 0,
+                    item.connectionPlateCountPerFace || 0, item.connectionPlateFaces || 0,
+                    item.connectionPlateW || 0, item.connectionPlateH || 0, item.connectionPlateT || 0,
+                    item.studFaces || 0, item.studRowsPerFace || 0, item.studSpacing || 0,
+                    item.boltFaces || 0, item.boltCountPerFace || 0, item.boltWeight || 0,
+                    item.weights.unitTotal.toFixed(4), fireAreaSingle.toFixed(4)
+                ];
+            });
+            
+            const escapeCSV = (cell) => {
+                if (cell === undefined || cell === null) return '';
+                const str = String(cell);
+                if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+                    return '"' + str.replace(/"/g, '""') + '"';
+                }
+                return str;
+            };
+            
+            const csvContent = [
+                headers.map(escapeCSV).join(','),
+                ...rows.map(row => row.map(escapeCSV).join(','))
+            ].join('\n');
+            
+            const blob = new Blob(["\uFEFF" + csvContent], { type: "text/csv;charset=utf-8;" });
+            const link = document.createElement("a");
+            const url = URL.createObjectURL(blob);
+            link.href = url;
+            link.setAttribute("download", "鋼構清單.csv");
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(url);
+        };
+        
+        // CSV 匯入 (維持既有邏輯)
+        const importCSV = (file) => {
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                const text = e.target.result;
+                const lines = text.split(/\r?\n/);
+                if (lines.length < 2) {
+                    alert("CSV 檔案內容至少需要標題列與一筆資料");
+                    return;
+                }
+                const parseCSVLine = (line) => {
+                    const result = [];
+                    let inQuote = false;
+                    let current = '';
+                    for (let i = 0; i < line.length; i++) {
+                        const ch = line[i];
+                        if (ch === '"') {
+                            if (inQuote && line[i+1] === '"') {
+                                current += '"';
+                                i++;
+                            } else {
+                                inQuote = !inQuote;
+                            }
+                        } else if (ch === ',' && !inQuote) {
+                            result.push(current);
+                            current = '';
+                        } else {
+                            current += ch;
+                        }
+                    }
+                    result.push(current);
+                    return result.map(v => v.trim());
+                };
+                
+                const rawHeaders = parseCSVLine(lines[0]);
+                const colMap = {};
+                rawHeaders.forEach((h, idx) => {
+                    const mapKey = {
+                        "構件編號": "name", "樓層": "floor", "類型(柱/梁)": "categoryDisplay", "截面型式(BOX/BH/RH)": "sectionType",
+                        "高h(mm)": "h", "寬B(mm)": "w", "板厚T/腹板厚t1(mm)": "t1", "翼板厚t2(mm)": "t2", "長度(mm)": "length",
+                        "RH單位重量(kg/m)": "rhUnitWeight", "數量": "count",
+                        "加勁板數量": "stiffenerCount", "加勁板W(mm)": "stiffenerW", "加勁板H(mm)": "stiffenerH", "加勁板T(mm)": "stiffenerT",
+                        "連接板每面片數": "connectionPlateCountPerFace", "連接板面數": "connectionPlateFaces",
+                        "連接板W(mm)": "connectionPlateW", "連接板H(mm)": "connectionPlateH", "連接板T(mm)": "connectionPlateT",
+                        "剪力釘面數": "studFaces", "剪力釘每面排數": "studRowsPerFace", "剪力釘間距(mm)": "studSpacing",
+                        "螺栓面數": "boltFaces", "螺栓單面支數": "boltCountPerFace", "螺栓單重(kg)": "boltWeight"
+                    }[h];
+                    if (mapKey) colMap[idx] = mapKey;
+                });
+                
+                const newItemsRaw = [];
+                let errorCount = 0;
+                for (let i = 1; i < lines.length; i++) {
+                    if (!lines[i].trim()) continue;
+                    const cells = parseCSVLine(lines[i]);
+                    if (cells.length < 5) continue;
+                    const getVal = (key) => {
+                        const idx = Object.keys(colMap).find(k => colMap[k] === key);
+                        if (idx !== undefined && cells[idx] !== undefined) return cells[idx];
+                        return null;
+                    };
+                    const name = getVal("name");
+                    const floor = getVal("floor") || "1F";
+                    const sectionTypeRaw = getVal("sectionType");
+                    const categoryDisplay = getVal("categoryDisplay");
+                    let sectionType = null;
+                    if (sectionTypeRaw === "BOX" || sectionTypeRaw === "BH" || sectionTypeRaw === "RH") sectionType = sectionTypeRaw;
+                    else if (categoryDisplay === "柱") sectionType = "BOX";
+                    else if (categoryDisplay === "梁") sectionType = "BH";
+                    if (!sectionType || !name || name.trim() === "") {
+                        errorCount++;
+                        continue;
+                    }
+                    
+                    const h = parseFloat(getVal("h")) || 0;
+                    const w = parseFloat(getVal("w")) || 0;
+                    let t1 = parseFloat(getVal("t1")) || 0;
+                    let t2 = parseFloat(getVal("t2")) || 0;
+                    if (sectionType === "BOX") {
+                        t2 = t1;
+                    }
+                    const length = parseFloat(getVal("length")) || 0;
+                    if (h <= 0 || w <= 0 || length <= 0) {
+                        errorCount++;
+                        continue;
+                    }
+                    const count = parseInt(getVal("count")) || 1;
+                    const rhUnitWeight = parseFloat(getVal("rhUnitWeight")) || 0;
+                    if (sectionType === "RH" && rhUnitWeight <= 0) {
+                        errorCount++;
+                        continue;
+                    }
+                    
+                    const stiffenerCount = parseInt(getVal("stiffenerCount")) || 0;
+                    const stiffenerW = parseFloat(getVal("stiffenerW")) || 0;
+                    const stiffenerH = parseFloat(getVal("stiffenerH")) || 0;
+                    const stiffenerT = parseFloat(getVal("stiffenerT")) || 0;
+                    const connectionPlateCountPerFace = parseInt(getVal("connectionPlateCountPerFace")) || 0;
+                    const connectionPlateFaces = parseInt(getVal("connectionPlateFaces")) || (sectionType === "BOX" ? 1 : 2);
+                    const connectionPlateW = parseFloat(getVal("connectionPlateW")) || 0;
+                    const connectionPlateH = parseFloat(getVal("connectionPlateH")) || 0;
+                    const connectionPlateT = parseFloat(getVal("connectionPlateT")) || 0;
+                    const studFaces = parseInt(getVal("studFaces")) || (sectionType === "BOX" ? 4 : 1);
+                    const studRowsPerFace = parseInt(getVal("studRowsPerFace")) || 0;
+                    const studSpacing = parseFloat(getVal("studSpacing")) || 0;
+                    let boltFaces = 0;
+                    const boltFacesRaw = getVal("boltFaces");
+                    if (boltFacesRaw !== null && !isNaN(parseInt(boltFacesRaw))) boltFaces = parseInt(boltFacesRaw);
+                    const boltCountPerFace = parseInt(getVal("boltCountPerFace")) || 0;
+                    const boltWeight = parseFloat(getVal("boltWeight")) || 0.5;
+                    
+                    const rawItem = {
+                        name, floor, count, h, w, t1, t2, length, rhUnitWeight,
+                        stiffenerCount, stiffenerW, stiffenerH, stiffenerT,
+                        connectionPlateCountPerFace, connectionPlateFaces, connectionPlateW, connectionPlateH, connectionPlateT,
+                        studFaces, studRowsPerFace, studSpacing,
+                        boltFaces, boltCountPerFace, boltWeight,
+                    };
+                    
+                    const completeRaw = {
+                        ...rawItem,
+                        stiffenerCount: rawItem.stiffenerCount || 0,
+                        stiffenerW: rawItem.stiffenerW || 0,
+                        stiffenerH: rawItem.stiffenerH || 0,
+                        stiffenerT: rawItem.stiffenerT || 0,
+                        studSpacing: rawItem.studSpacing || 0,
+                        studRowsPerFace: rawItem.studRowsPerFace || 0,
+                        studFaces: rawItem.studFaces,
+                        boltCountPerFace: rawItem.boltCountPerFace || 0,
+                        boltFaces: rawItem.boltFaces,
+                        boltWeight: rawItem.boltWeight,
+                    };
+                    
+                    const newItem = buildItemFromRaw(completeRaw, sectionType, Date.now() + i);
+                    newItemsRaw.push(newItem);
+                }
+                
+                if (newItemsRaw.length === 0) {
+                    alert("匯入失敗：沒有有效資料，請檢查CSV欄位格式");
+                    return;
+                }
+                if (errorCount > 0) alert(`成功匯入 ${newItemsRaw.length} 筆構件，${errorCount} 筆無效資料已略過。`);
+                else alert(`成功匯入 ${newItemsRaw.length} 筆構件，將取代現有清單。`);
+                setItems(newItemsRaw);
+                setExpandedItems({});
+            };
+            reader.onerror = () => alert("讀取檔案失敗");
+            reader.readAsText(file, "UTF-8");
+        };
+        
+        const triggerImport = () => { if (fileInputRef.current) fileInputRef.current.click(); };
+        const handleFileChange = (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            if (window.confirm("匯入CSV將會【完全覆蓋】目前所有構件資料，確定繼續嗎？")) importCSV(file);
+            e.target.value = null;
+        };
+
+        const inputClass = "w-full px-4 py-3 border border-slate-200 rounded-xl focus:border-blue-500 focus:ring-4 focus:ring-blue-50 outline-none transition-all text-base font-bold text-slate-900 no-spinner";
+        const labelClass = "block text-xs font-black text-slate-500 uppercase mb-1.5 tracking-wider";
+
+        return (
+            <div className="min-h-screen bg-green-50 p-4 md:p-8 font-sans text-slate-800">
+                <div className="max-w-7xl mx-auto">
+                    <header className="flex flex-col md:flex-row items-center justify-between mb-8 bg-white p-6 rounded-2xl shadow-md border border-slate-200 gap-4 no-print">
+                        <div className="flex items-center gap-4">
+                            <div className="bg-blue-600 p-4 rounded-2xl text-white shadow-lg shadow-blue-200"><i className="fas fa-calculator text-4xl"></i></div>
+                            <div><h1 className="text-3xl font-black text-slate-900 tracking-tight">鋼構數量計算系統 v6.0</h1><p className="text-base text-slate-500 font-medium">梁防火被覆公式 (2H+3B-2*t1)*L | 緊固件獨立統計</p></div>
+                        </div>
+                        <div className="flex gap-3 items-center flex-wrap">
+                            <button onClick={exportToCSV} className="csv-btn bg-emerald-600 hover:bg-emerald-700 text-white font-black py-3 px-6 rounded-xl shadow-md transition-all flex items-center gap-2 text-sm"><i className="fas fa-download"></i> 匯出 CSV</button>
+                            <button onClick={triggerImport} className="csv-btn bg-amber-600 hover:bg-amber-700 text-white font-black py-3 px-6 rounded-xl shadow-md transition-all flex items-center gap-2 text-sm"><i className="fas fa-upload"></i> 匯入 CSV</button>
+                            <button onClick={handleExportPDF} className="export-pdf-btn bg-red-600 hover:bg-red-700 text-white font-black py-3 px-6 rounded-xl shadow-md transition-all flex items-center gap-2 text-sm"><i className="fas fa-file-pdf"></i> 匯出 PDF</button>
+                            <div className="bg-slate-900 px-6 py-3 rounded-2xl text-right min-w-[220px] shadow-xl shadow-slate-200 total-weight-card"><p className="text-xs text-slate-400 uppercase tracking-widest font-black mb-1">工程總重量 (不含螺栓+剪力釘)</p><p className="text-3xl font-black text-blue-400 tracking-tighter">{totalWeight.toFixed(3)} <span className="text-sm">t</span></p></div>
+                        </div>
+                    </header>
+                    
+                    <input type="file" ref={fileInputRef} accept=".csv" className="hidden" onChange={handleFileChange} />
+
+                    <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+                        {/* 左側表單區塊 (同原設計，無需變更) */}
+                        <div className="lg:col-span-4 space-y-6 no-print">
+                            <div className="bg-white rounded-3xl shadow-xl border border-slate-200 overflow-hidden sticky top-8">
+                                <div className="flex bg-slate-50 p-2 m-3 rounded-2xl">
+                                    {['BOX', 'BH', 'RH'].map(tab => (<button key={tab} onClick={() => setActiveTab(tab)} className={`flex-1 py-4 text-sm font-black rounded-xl transition-all ${activeTab === tab ? 'bg-white text-blue-600 shadow-md border border-slate-100' : 'text-slate-500 hover:text-slate-700'}`}>{tab} {tab === 'BOX' ? '柱' : '梁'}</button>))}
+                                </div>
+                                <div className="p-6 space-y-6 max-h-[75vh] overflow-y-auto custom-scrollbar">
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <div><label className={labelClass}>所屬樓層</label><input type="text" name="floor" value={formData.floor} onChange={handleInputChange} className={inputClass} /></div>
+                                        <div><label className={labelClass}>數量 (pcs)</label><input type="number" name="count" value={formData.count} onChange={handleInputChange} className={inputClass} /></div>
+                                        <div className="col-span-2"><label className={`${labelClass} ${!formData.name ? 'text-red-500' : ''}`}>構件編號 {!formData.name && '(必填)'}</label><input type="text" name="name" value={formData.name} onChange={handleInputChange} className={`${inputClass} ${!formData.name ? 'bg-red-50 border-red-200' : ''}`} placeholder="例: C1, G2, RB-01" /></div>
+                                    </div>
+                                    <div className="pt-6 border-t border-slate-100"><h3 className="text-sm font-black text-slate-800 mb-4 flex items-center gap-2"><i className="fas fa-layer-group text-blue-500"></i> 主體規格 (mm)</h3><div className="grid grid-cols-2 gap-4"><div className="col-span-2"><label className={labelClass}>總長度 L (mm)</label><input type="number" name="length" value={formData.length} onChange={handleInputChange} className={`${inputClass} font-mono text-blue-700`} /></div>
+                                        <div><label className={labelClass}>高 H (mm)</label><input type="number" name="h" value={formData.h} onChange={handleInputChange} className={inputClass} /></div>
+                                        <div><label className={labelClass}>寬 B (mm)</label><input type="number" name="w" value={formData.w} onChange={handleInputChange} className={inputClass} /></div>
+                                        {activeTab === 'BOX' ? (
+                                            <div className="col-span-2"><label className={labelClass}>板厚 T (mm)</label><input type="number" name="t1" value={formData.t1} onChange={handleInputChange} className={`${inputClass} bg-blue-50 border-blue-200`} /></div>
+                                        ) : (
+                                            <>
+                                                <div><label className={labelClass}>腹板厚 t1 (mm)</label><input type="number" name="t1" value={formData.t1} onChange={handleInputChange} className={inputClass} /></div>
+                                                <div><label className={labelClass}>翼板厚 t2 (mm)</label><input type="number" name="t2" value={formData.t2} onChange={handleInputChange} className={inputClass} /></div>
+                                            </>
+                                        )}
+                                        {activeTab === 'RH' && (<div className="col-span-2 mt-2"><label className={labelClass}>型鋼單位重量 (kg/m) <span className="text-red-500">*</span></label><input type="number" name="rhUnitWeight" value={formData.rhUnitWeight} onChange={handleInputChange} className={`${inputClass} bg-amber-50 border-amber-200`} placeholder="例: 120.5 kg/m" step="any" /></div>)}
+                                    </div></div>
+                                    <div className="pt-6 border-t border-slate-100"><h3 className="text-sm font-black text-slate-800 mb-4 flex items-center gap-2 text-blue-600"><i className="fas fa-plus-circle"></i> 零件與耗材明細</h3><div className="space-y-4"><div className="p-4 bg-blue-50/50 rounded-2xl border border-blue-100"><p className="text-[10px] font-black text-blue-600 uppercase tracking-widest mb-2"><i className="fas fa-cube"></i> 加勁板 Stiffener</p><div className="grid grid-cols-4 gap-2"><div><label className="block text-[8px] font-black text-slate-400 mb-1 text-center">數量</label><input type="number" name="stiffenerCount" value={formData.stiffenerCount} onChange={handleInputChange} className="w-full px-1 py-2 border border-slate-200 rounded-lg text-sm text-center font-bold no-spinner" /></div>{['stiffenerW','stiffenerH','stiffenerT'].map(f=>(<div key={f}><label className="block text-[8px] font-black text-slate-400 mb-1 text-center">{f === 'stiffenerW' ? 'B' : (f === 'stiffenerH' ? 'H' : 't')}</label><input type="number" name={f} value={formData[f]} onChange={handleInputChange} className="w-full px-1 py-2 border border-slate-200 rounded-lg text-xs text-center font-mono no-spinner" /></div>))}</div></div><div className="p-4 bg-indigo-50/50 rounded-2xl border border-indigo-100"><p className="text-[10px] font-black text-indigo-600 uppercase tracking-widest mb-2 flex justify-between items-center"><span><i className="fas fa-link"></i> 連接板 Connection Plates</span><span className="text-indigo-700 font-black">合計: {formData.connectionPlateCountPerFace * formData.connectionPlateFaces} 片</span></p><div className="grid grid-cols-5 gap-1.5"><div className="col-span-1"><label className="block text-[8px] font-black text-slate-400 mb-1 text-center">面數</label><input type="number" name="connectionPlateFaces" value={formData.connectionPlateFaces} onChange={handleInputChange} className="w-full px-1 py-2 border border-indigo-200 rounded-lg text-xs text-center font-black" /></div><div className="col-span-1"><label className="block text-[8px] font-black text-slate-400 mb-1 text-center">每面</label><input type="number" name="connectionPlateCountPerFace" value={formData.connectionPlateCountPerFace} onChange={handleInputChange} className="w-full px-1 py-2 border border-slate-200 rounded-lg text-xs text-center font-bold" /></div>{['connectionPlateW','connectionPlateH','connectionPlateT'].map(f=>(<div key={f}><label className="block text-[8px] font-black text-slate-400 mb-1 text-center">{f === 'connectionPlateW' ? 'B' : (f === 'connectionPlateH' ? 'H' : 't')}</label><input type="number" name={f} value={formData[f]} onChange={handleInputChange} className="w-full px-1 py-2 border border-slate-200 rounded-lg text-[10px] text-center font-mono" /></div>))}</div></div><div className="p-4 bg-emerald-50/50 rounded-2xl border border-emerald-100"><p className="text-[10px] font-black text-emerald-600 uppercase tracking-widest mb-2 flex justify-between items-center"><span><i className="fas fa-bolt"></i> 剪力釘 Stud</span><span className="text-emerald-700 font-black">合計: {formData.studCount} 支</span></p><div className="grid grid-cols-3 gap-2"><div><label className="block text-[8px] font-black text-slate-400 mb-1">面數</label><input type="number" name="studFaces" value={formData.studFaces} onChange={handleInputChange} className="w-full px-2 py-2 border border-emerald-200 rounded-lg text-xs font-black" /></div><div><label className="block text-[8px] font-black text-slate-400 mb-1">每面排數</label><input type="number" name="studRowsPerFace" value={formData.studRowsPerFace} onChange={handleInputChange} className="w-full px-2 py-2 border border-slate-200 rounded-lg text-xs font-bold" /></div><div><label className="block text-[8px] font-black text-slate-400 mb-1">間距</label><input type="number" name="studSpacing" value={formData.studSpacing} onChange={handleInputChange} className="w-full px-2 py-2 border border-slate-200 rounded-lg text-xs font-bold" /></div></div></div><div className="p-4 bg-slate-50 rounded-2xl border border-slate-200"><p className="text-[10px] font-black text-slate-600 uppercase tracking-widest mb-2 flex justify-between items-center"><span><i className="fas fa-microchip"></i> 高強螺栓 Bolts</span><span className="text-slate-700 font-black">總計: {formData.boltTotalCount} 支</span></p><div className="grid grid-cols-3 gap-2"><div><label className="block text-[8px] font-black text-slate-400 mb-1">面數</label><input type="number" name="boltFaces" value={formData.boltFaces} onChange={handleInputChange} className="w-full px-2 py-2 border border-slate-200 rounded-lg text-xs font-black" /></div><div><label className="block text-[8px] font-black text-slate-400 mb-1">單面支數</label><input type="number" name="boltCountPerFace" value={formData.boltCountPerFace} onChange={handleInputChange} className="w-full px-2 py-2 border border-slate-200 rounded-lg text-xs font-bold" /></div><div><label className="block text-[8px] font-black text-slate-400 mb-1">單重(kg)</label><input type="number" name="boltWeight" value={formData.boltWeight} onChange={handleInputChange} className="w-full px-2 py-2 border border-slate-200 rounded-lg text-xs font-bold" /></div></div><p className="text-[9px] text-slate-400 mt-1.5 italic"><i className="fas fa-check-circle text-emerald-500"></i> 柱、梁均可自由設定螺栓面數 (重量不計入合計總重)</p></div></div></div>
+                                    <button onClick={addItem} disabled={!formData.name} className={`add-item-btn w-full font-black py-5 rounded-2xl transition-all shadow-xl flex items-center justify-center gap-3 text-lg ${!formData.name ? 'bg-slate-200 text-slate-400 shadow-none' : 'bg-blue-600 hover:bg-blue-700 text-white shadow-blue-100 active:scale-95'}`}><i className="fas fa-plus"></i> 新增至計算清單</button>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* 右側報表區 - 防火面積全面動態套用新公式 */}
+                        <div className="lg:col-span-8 space-y-6 print-show">
+                            <div className="bg-white rounded-2xl shadow-md border border-slate-200 p-5 flex flex-wrap items-center justify-between gap-4 break-inside-avoid">
+                                <div className="flex items-center gap-4"><div className="bg-emerald-100 p-3 rounded-xl text-emerald-700"><i className="fas fa-beam fa-fw text-2xl"></i></div><div><p className="text-xs font-black text-emerald-600 uppercase tracking-wider">全工程 梁總重(不含緊固件)</p><p className="text-2xl font-black text-slate-800">{totalBeamWeight.toFixed(3)} <span className="text-sm">t</span></p></div></div>
+                                <div className="w-px h-10 bg-slate-200 hidden md:block"></div>
+                                <div className="flex items-center gap-4"><div className="bg-indigo-100 p-3 rounded-xl text-indigo-700"><i className="fas fa-columns fa-fw text-2xl"></i></div><div><p className="text-xs font-black text-indigo-600 uppercase tracking-wider">全工程 柱總重(不含緊固件)</p><p className="text-2xl font-black text-slate-800">{totalColumnWeight.toFixed(3)} <span className="text-sm">t</span></p></div></div>
+                                <div className="w-px h-10 bg-slate-200 hidden md:block"></div>
+                                <div className="flex items-center gap-4"><div className="bg-blue-100 p-3 rounded-xl text-blue-700"><i className="fas fa-weight-hanging text-2xl"></i></div><div><p className="text-xs font-black text-blue-600 uppercase tracking-wider">全工程 合計總重(不含緊固件)</p><p className="text-2xl font-black text-blue-700">{totalWeight.toFixed(3)} <span className="text-sm">t</span></p></div></div>
+                            </div>
+                            <div className="bg-white/90 backdrop-blur-sm rounded-2xl shadow-md border border-emerald-200 p-5 flex flex-wrap items-center justify-between gap-4 break-inside-avoid">
+                                <div className="flex items-center gap-4"><div className="bg-emerald-100 p-3 rounded-xl text-emerald-700"><i className="fas fa-bolt text-2xl"></i></div><div><p className="text-xs font-black text-emerald-600 uppercase tracking-wider">總剪力釘支數 (全工程)</p><p className="text-3xl font-black text-slate-800">{totalStudsAll.toLocaleString()} <span className="text-sm font-bold text-slate-500">支</span></p></div></div>
+                                <div className="w-px h-12 bg-emerald-200 hidden md:block"></div>
+                                <div className="flex items-center gap-4"><div className="bg-indigo-100 p-3 rounded-xl text-indigo-700"><i className="fas fa-microchip text-2xl"></i></div><div><p className="text-xs font-black text-indigo-600 uppercase tracking-wider">總高強螺栓支數 (全工程)</p><p className="text-3xl font-black text-slate-800">{totalBoltsAll.toLocaleString()} <span className="text-sm font-bold text-slate-500">支</span></p></div></div>
+                                <div className="w-px h-12 bg-slate-300 hidden md:block"></div>
+                                <div className="flex items-center gap-4"><div className="bg-amber-100 p-3 rounded-xl text-amber-700"><i className="fas fa-weight-hanging text-2xl"></i></div><div><p className="text-xs font-black text-amber-600 uppercase tracking-wider">剪力釘+螺栓總重</p><p className="text-3xl font-black text-amber-800">{totalFastenersWeight.toFixed(3)} <span className="text-sm">t</span></p></div></div>
+                            </div>
+                            <div className="bg-white rounded-2xl shadow-md border border-orange-200 p-5 flex flex-wrap items-center justify-between gap-4 break-inside-avoid">
+                                <div className="flex items-center gap-4"><div className="bg-orange-100 p-3 rounded-xl text-orange-700"><i className="fas fa-fire-extinguisher text-2xl"></i></div><div><p className="text-xs font-black text-orange-600 uppercase tracking-wider">防火被覆 梁面積 (新公式)</p><p className="text-2xl font-black text-slate-800">{totalBeamFire.toFixed(2)} <span className="text-sm">m²</span></p></div></div>
+                                <div className="w-px h-10 bg-orange-200 hidden md:block"></div>
+                                <div className="flex items-center gap-4"><div className="bg-amber-100 p-3 rounded-xl text-amber-700"><i className="fas fa-fire text-2xl"></i></div><div><p className="text-xs font-black text-amber-600 uppercase tracking-wider">防火被覆 柱面積</p><p className="text-2xl font-black text-slate-800">{totalColumnFire.toFixed(2)} <span className="text-sm">m²</span></p></div></div>
+                                <div className="w-px h-10 bg-orange-200 hidden md:block"></div>
+                                <div className="flex items-center gap-4"><div className="bg-red-100 p-3 rounded-xl text-red-700"><i className="fas fa-chart-simple text-2xl"></i></div><div><p className="text-xs font-black text-red-600 uppercase tracking-wider">防火被覆 總面積</p><p className="text-2xl font-black text-red-700">{totalFireArea.toFixed(2)} <span className="text-sm">m²</span></p></div></div>
+                            </div>
+                            {/* 樓層統計表 */}
+                            <div className="bg-white rounded-3xl shadow-md border border-slate-200 overflow-hidden break-inside-avoid"><div className="px-8 py-5 border-b border-slate-100 bg-slate-50/50 flex items-center gap-2"><i className="fas fa-chart-pie text-blue-600"></i><h2 className="text-lg font-black text-slate-800">樓層重量(不含緊固件)、緊固件數量及防火被覆統計</h2></div><div className="p-8 overflow-x-auto"><table className="w-full text-left min-w-[900px]"><thead><tr className="text-xs font-black text-slate-400 uppercase tracking-widest border-b border-slate-200"><th className="pb-4 px-2">樓層</th><th className="pb-4 px-2">梁重(t)</th><th className="pb-4 px-2">柱重(t)</th><th className="pb-4 px-2 text-right">合計(t)</th><th className="pb-4 px-2 text-center">剪力釘(支)</th><th className="pb-4 px-2 text-center">螺栓(支)</th><th className="pb-4 px-2 text-center">梁被覆(m²)</th><th className="pb-4 px-2 text-center">柱被覆(m²)</th><th className="pb-4 px-2 text-center">小計(m²)</th></tr></thead><tbody>{floorStats.length === 0 ? <tr><td colSpan="9" className="py-12 text-center text-slate-300 font-bold">尚未輸入數據</td></tr> : floorStats.map(([floor, data]) => (<tr key={floor} className="hover:bg-slate-50 border-b border-slate-100"><td className="py-5 px-2 font-black">{floor}</td><td className="py-5 px-2 text-emerald-600 font-bold">{data.beam.toFixed(3)}</td><td className="py-5 px-2 text-indigo-600 font-bold">{data.column.toFixed(3)}</td><td className="py-5 px-2 text-right font-black text-xl">{data.total.toFixed(3)}</td><td className="py-5 px-2 text-center font-bold text-emerald-700">{data.studs.toLocaleString()}</td><td className="py-5 px-2 text-center font-bold text-indigo-700">{data.bolts.toLocaleString()}</td><td className="py-5 px-2 text-center text-orange-700 font-bold">{data.beamFire.toFixed(2)}</td><td className="py-5 px-2 text-center text-amber-700 font-bold">{data.columnFire.toFixed(2)}</td><td className="py-5 px-2 text-center font-black text-red-600">{data.totalFire.toFixed(2)}</td></tr>))}</tbody></table></div></div>
+                            {/* 構件清單明細 */}
+                            <div className="bg-white rounded-3xl shadow-xl border border-slate-200 overflow-hidden flex flex-col">
+                                <div className="p-8 border-b border-slate-100 flex justify-between items-center no-print flex-wrap gap-3">
+                                    <h2 className="text-xl font-black text-slate-800 flex items-center gap-2"><i className="fas fa-list-ul"></i> 構件清單明細</h2>
+                                    <div className="flex items-center gap-3">
+                                        <span className="text-sm bg-slate-100 px-3 py-1 rounded-full font-bold">{items.length} 筆構件</span>
+                                        <button onClick={handleClearAllItems} className="clear-all-btn bg-rose-600 hover:bg-rose-700 text-white font-black py-2 px-4 rounded-xl shadow-md transition-all flex items-center gap-2 text-sm"><i className="fas fa-trash-alt"></i> 全部刪除</button>
+                                    </div>
+                                </div>
+                                <div className="flex-1 overflow-y-auto p-8 space-y-6 max-h-[700px] bg-slate-50/30 custom-scrollbar print:overflow-visible print:max-h-none">
+                                    {items.length === 0 ? 
+                                        <div className="text-center py-16 text-slate-300 flex flex-col items-center gap-3"><i className="fas fa-box-open text-5xl"></i><p className="font-bold">請從左側新增鋼構件，或匯入CSV</p></div> 
+                                        : 
+                                        items.map(item => {
+                                            const fireAreaSingle = getFireAreaByItem(item);
+                                            return (
+                                            <div key={item.id} className="bg-white border border-slate-200 rounded-2xl p-6 hover:border-blue-400 transition-all relative cursor-pointer print:border print:shadow-none break-inside-avoid" onClick={() => toggleExpand(item.id)}>
+                                                <div className={`absolute top-0 left-0 w-2 h-full rounded-l-2xl ${item.category === '柱' ? 'bg-indigo-500' : 'bg-emerald-500'}`} />
+                                                <button onClick={(e) => { e.stopPropagation(); removeItem(item.id); }} className="absolute top-6 right-6 p-2 text-slate-300 hover:text-red-500 transition delete-item-btn no-print"><i className="fas fa-trash-alt"></i></button>
+                                                <div className="flex flex-col gap-3">
+                                                    <div className="flex items-center gap-4 flex-wrap">
+                                                        <span className="text-xs px-2 py-1 bg-slate-900 text-white font-black rounded">{item.floor}</span>
+                                                        <h3 className="font-black text-2xl">{item.name}</h3>
+                                                        <span className="text-sm font-bold text-slate-400">× {item.count}pcs</span>
+                                                        <div className="ml-auto mr-10 text-slate-400 toggle-expand-icon no-print">{expandedItems[item.id] ? <i className="fas fa-chevron-up"></i> : <i className="fas fa-chevron-down"></i>}</div>
+                                                    </div>
+                                                    <div className="text-sm font-mono text-slate-600">{item.type}: H{Math.round(item.h)}×B{Math.round(item.w)} {item.type === 'BOX' ? `T=${item.t1}` : `t1=${item.t1} t2=${item.t2}`} (L:{Math.round(item.length)} mm){item.type === 'RH' && item.rhUnitWeight > 0 && ` | 單位重: ${item.rhUnitWeight} kg/m`}
+                                                        <div className="mt-1 text-xs text-slate-500 flex flex-wrap gap-3">
+                                                            {item.studCount > 0 && <span><i className="fas fa-bolt text-emerald-500 mr-1"></i>剪力釘: {item.studCount}支/單支 ×{item.count}= {(item.studCount * item.count)}支</span>}
+                                                            {item.boltTotalCount > 0 && <span><i className="fas fa-microchip text-indigo-500 mr-1"></i>螺栓: {item.boltTotalCount}支/單支 ×{item.count}= {(item.boltTotalCount * item.count)}支</span>}
+                                                            <span><i className="fas fa-fire-extinguisher text-orange-500 mr-1"></i>防火被覆: {(fireAreaSingle * item.count).toFixed(2)} m² (單根{fireAreaSingle.toFixed(2)} m²)</span>
+                                                        </div>
+                                                    </div>
+                                                    {expandedItems[item.id] && (
+                                                        <div className="mt-4 p-4 bg-blue-50 border-2 border-dashed border-blue-200 rounded-xl space-y-2 animate-in no-print">
+                                                            <p className="text-[11px] font-black text-blue-600 uppercase flex items-center gap-1"><i className="fas fa-file-alt"></i> 計算式明細</p>
+                                                            <p className="text-xs font-bold text-slate-700">{item.weights.formulaMain}</p>
+                                                            {item.weights.partsStiffConnFormulas.length > 0 && (<div><p className="text-[10px] font-black text-indigo-700 mt-2">🔩 零件 (加勁板+連接板) 明細：</p><ul className="text-xs space-y-1 text-slate-600 font-medium pl-2">{item.weights.partsStiffConnFormulas.map((f, i) => <li key={i}>• {f}</li>)}</ul></div>)}
+                                                            {item.weights.fastenersFormulas.length > 0 && (<div><p className="text-[10px] font-black text-emerald-700 mt-2">⚙️ 緊固件 (剪力釘+螺栓) 明細 (不計入總重)：</p><ul className="text-xs space-y-1 text-slate-600 font-medium pl-2">{item.weights.fastenersFormulas.map((f, i) => <li key={i}>• {f}</li>)}</ul></div>)}
+                                                            <div className="pt-1 text-xs text-orange-600 border-t border-blue-200 mt-1">
+                                                                <i className="fas fa-calculator mr-1"></i>
+                                                                防火被覆面積: {item.category === '柱' ? '四面' : '梁(新公式)'} = 
+                                                                {item.category === '柱' 
+                                                                    ? `2×(${item.h}+${item.w})×${item.length}/1e6` 
+                                                                    : `(2×${item.h} + 3×${item.w} - 2×${item.t1})×${item.length}/1e6`} 
+                                                                = {fireAreaSingle.toFixed(2)} m²/根
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                    <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 mt-2">
+                                                        <div><p className="text-[10px] text-slate-400 font-black">主體重量</p><p className="font-black text-base">{item.weights.main.toFixed(3)} t</p></div>
+                                                        <div><p className="text-[10px] text-indigo-500 font-black">📌 加勁+連接板</p><p className="font-black text-indigo-700">{item.weights.partsStiffConn.toFixed(3)} t</p></div>
+                                                        <div><p className="text-[10px] text-emerald-600 font-black">🔩 剪力釘+螺栓 (不計總重)</p><p className="font-black text-emerald-700">{item.weights.fasteners.toFixed(3)} t</p></div>
+                                                        <div className="text-right"><p className="text-[10px] text-blue-400 font-black">合計總重 (不含緊固件)</p><p className="font-black text-blue-600 text-xl">{item.weights.total.toFixed(3)} t</p></div>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        )})}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        );
+    };
+
+    const rootElement = document.getElementById('root');
+    const root = ReactDOM.createRoot(rootElement);
+    root.render(<App />);
+</script>
+</body>
+</html>
